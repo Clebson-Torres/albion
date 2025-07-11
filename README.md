@@ -31,8 +31,8 @@ O código é organizado de forma modular para facilitar a manutenção e expans�
 
 1. **Clone o repositório:**
    ```bash
-   git clone https://github.com/seu-usuario/seu-repositorio.git
-   cd seu-repositorio
+   git clone https://github.com/Clebson-Torres/albion.git
+   cd albion
    ```
 
 2. **Crie e ative um ambiente virtual (recomendado):**
