@@ -1,155 +1,190 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from langchain_ollama.llms import OllamaLLM
 from langchain.prompts import PromptTemplate
 from data_loader import ItemDataLoader
 from api_client import AlbionApiClient
 
-# --- Inicialização de Serviços ---
+# --- INICIALIZAÇÃO DE SERVIÇOS ---
 try:
     llm = OllamaLLM(model="gemma3:4b")
-    PROMPT_TEMPLATE = PromptTemplate.from_template(
-        'Você é um assistente especialista em Albion Online. Extraia até 6 variantes do nome do item do pedido do usuário. '
-        'Responda APENAS com o nome do item. Se não entender, responda com "ERRO". '
-        'Pedido do usuário: "{user_input}"'
-    )
     LLM_ENABLED = True
     print("🤖 Assistente de IA inicializado.")
 except Exception as e:
     print(f"⚠️  Não foi possível inicializar o assistente de IA: {e}")
-    print("   O programa continuará em modo de busca simples.")
     LLM_ENABLED = False
 
-class AlbionArbitrageAnalyzer:
-    """Analisa e apresenta oportunidades de arbitragem no Albion Online."""
-    def __init__(self, item_loader: ItemDataLoader, api_client: AlbionApiClient):
-        self.item_loader = item_loader
+# --- PROMPTS PARA A IA ---
+PROMPT_IDENTIFICACAO = PromptTemplate.from_template(
+    'Você é um especialista em Albion Online. Extraia o nome base do item do pedido do usuário. '
+    'Responda APENAS com o nome do item. Se não entender, responda "ERRO". '
+    'Pedido: "{user_input}"'
+)
+
+PROMPT_ANALISTA_HIBRIDO = PromptTemplate.from_template(
+    'Você é um trader mestre de Albion Online. Sua tarefa é analisar os dados de mercado e a descrição de um item para responder à pergunta do usuário. '
+    'Seja direto e recomende se o item é uma boa oportunidade de arbitragem (flipping) ou não, explicando o porquê em 2-3 frases.\n\n' 
+    '--- DADOS DO ITEM ---\n' 
+    'Nome: {item_name}\n' 
+    'Descrição: {item_description}\n\n' 
+    '--- ANÁLISE DE MERCADO (TEMPO REAL) ---\n' 
+    '{market_summary}\n\n' 
+    '--- PERGUNTA DO USUÁRIO ---\n' 
+    '"{user_question}"\n\n' 
+    '--- SUA RECOMENDAÇÃO PROFISSIONAL ---\n' 
+    'Resposta:'
+)
+
+# --- CLASSES DE ANÁLISE ---
+class MarketAnalyzer:
+    """Analisa os dados de mercado para um único item."""
+    def __init__(self, api_client: AlbionApiClient):
         self.api_client = api_client
 
-    def analyze_arbitrage(self, item_ids: List[str]) -> List[Dict]:
-        """Coordena a busca de preços e a análise de oportunidades de arbitragem."""
-        prices = self.api_client.fetch_prices(item_ids)
+    def analyze_single_item_market(self, item_id: str) -> Optional[Dict]:
+        """Busca preços e calcula a melhor oportunidade de arbitragem para um item."""
+        prices = self.api_client.fetch_prices([item_id])
         if not prices:
-            return []
+            return None
 
-        opportunities = []
-        for item_id in item_ids:
-            item_name = self.item_loader.get_item_name(item_id)
-            if not item_name:
-                continue
-
-            # 1. Encontrar o local de compra mais barato
-            cheapest_buy, cheapest_price = None, float('inf')
-            for city, city_prices in prices.items():
-                if item_id in city_prices:
-                    sell_price = city_prices[item_id]["sell_min"]
-                    if 0 < sell_price < cheapest_price:
-                        cheapest_price = sell_price
-                        cheapest_buy = {"city": city, "price": sell_price}
-            
-            if not cheapest_buy:
-                continue
-            
-            # 2. Encontrar as melhores oportunidades de venda
-            best_sells = []
-            for city, city_prices in prices.items():
-                if city == cheapest_buy["city"]:
-                    continue
-                if item_id in city_prices:
-                    buy_price = city_prices[item_id]["buy_max"]
-                    profit = buy_price - cheapest_price
-                    if profit > 0:
-                        best_sells.append({
-                            "city": city,
-                            "price": buy_price,
-                            "profit": profit,
-                            "profit_percent": (profit / cheapest_price) * 100
-                        })
-            
-            # 3. Se houver vendas lucrativas, registrar a oportunidade
-            if best_sells:
-                best_sells.sort(key=lambda x: x["profit"], reverse=True)
-                opportunities.append({
-                    "item_name": item_name,
-                    "item_id": item_id,
-                    "buy_location": cheapest_buy,
-                    "sell_opportunities": best_sells[:3]  # Pega as 3 melhores
-                })
+        cheapest_buy, cheapest_price = None, float('inf')
+        for city, city_prices in prices.items():
+            if item_id in city_prices:
+                sell_price = city_prices[item_id]["sell_min"]
+                if 0 < sell_price < cheapest_price:
+                    cheapest_price = sell_price
+                    cheapest_buy = {"city": city, "price": sell_price}
         
-        return opportunities
+        if not cheapest_buy:
+            return None
 
-    def print_arbitrage_results(self, opportunities: List[Dict]):
-        """Formata e exibe os resultados da análise de arbitragem."""
-        if not opportunities:
-            print("❌ Nenhuma oportunidade de arbitragem encontrada.")
-            return
-        
-        print(f"\n{'='*80}\n🎯 OPORTUNIDADES DE ARBITRAGEM ENCONTRADAS: {len(opportunities)}\n{'='*80}")
-        for i, opp in enumerate(opportunities, 1):
-            print(f"\n📦 {i}. {opp['item_name']} ({opp['item_id']})")
-            print(f"💰 Comprar em: {opp['buy_location']['city']} por {opp['buy_location']['price']:,} silver")
-            print("🎯 Melhores locais para vender:")
-            for j, sell in enumerate(opp['sell_opportunities'], 1):
-                print(f"   {j}. {sell['city']}: {sell['price']:,} silver "
-                      f"(+{sell['profit']:,} | +{sell['profit_percent']:.1f}%) ")
-            print("-" * 50)
+        best_sell, best_price = None, 0
+        for city, city_prices in prices.items():
+            if city == cheapest_buy["city"]: continue
+            if item_id in city_prices:
+                buy_price = city_prices[item_id]["buy_max"]
+                if buy_price > best_price:
+                    best_price = buy_price
+                    best_sell = {"city": city, "price": buy_price}
 
-def get_search_term_from_user(user_input: str) -> str:
-    """Usa o LLM para extrair um termo de busca do input do usuário, se disponível."""
-    if LLM_ENABLED:
-        prompt = PROMPT_TEMPLATE.format(user_input=user_input)
-        print("🧠 Analisando seu pedido com a IA...")
-        try:
-            llm_response = llm.invoke(prompt).strip()
-            if "ERRO" in llm_response or not llm_response:
-                print("❌ A IA não conseguiu identificar um item. Usando busca simples.")
-                return user_input
-            
-            print(f"🤖 Item identificado pela IA: {llm_response}")
-            return llm_response
-        except Exception as e:
-            print(f"❌ Erro ao contatar a IA: {e}. Usando busca simples.")
-    return user_input
+        if not best_sell or best_sell["price"] <= cheapest_buy["price"]:
+            return None
+
+        profit = best_sell["price"] - cheapest_buy["price"]
+        profit_percent = (profit / cheapest_buy["price"]) * 100
+
+        return {
+            "buy_location": cheapest_buy,
+            "sell_location": best_sell,
+            "profit": profit,
+            "profit_percent": profit_percent
+        }
+
+# --- FUNÇÕES PRINCIPAIS ---
+def get_ai_recommendation(item_id: str, item_name: str, item_description: str, market_summary: str, user_question: str) -> str:
+    """Monta o prompt e consulta a IA para obter uma recomendação estratégica."""
+    if not LLM_ENABLED:
+        return "O modo IA está desativado. Não é possível gerar recomendação."
+
+    prompt = PROMPT_ANALISTA_HIBRIDO.format(
+        item_name=item_name,
+        item_description=item_description or "Nenhuma descrição disponível.",
+        market_summary=market_summary,
+        user_question=user_question
+    )
+    
+    print("\n🧠 A IA está analisando a oportunidade de mercado...")
+    try:
+        response = llm.invoke(prompt).strip()
+        return response
+    except Exception as e:
+        return f"❌ Erro ao contatar a IA: {e}"
 
 def main():
     """Função principal que executa o loop da aplicação."""
-    # Inicialização dos componentes
     item_loader = ItemDataLoader()
     if not item_loader.items_dict:
         print("Encerrando o programa devido à falha no carregamento dos itens.")
         return
         
     api_client = AlbionApiClient()
-    analyzer = AlbionArbitrageAnalyzer(item_loader, api_client)
+    market_analyzer = MarketAnalyzer(api_client)
     
-    print("\n🔍 BUSCA DE ITENS PARA ARBITRAGEM")
-    print("Digite o nome de um item (ou 'sair' para terminar)")
+    print("\n📈 ANALISTA DE MERCADO DE ALBION ONLINE 📈")
+    print("Faça uma pergunta sobre um item ou categoria (ex: 'qual a melhor espada para flipar?')")
 
     while True:
-        user_input = input("\n> ").strip()
-        if user_input.lower() in ['sair', 'exit', 'quit']:
+        user_question = input("\n> ").strip()
+        if user_question.lower() in ['sair', 'exit', 'quit']:
             print("👋 Até mais!")
             break
-        if not user_input:
+        if not user_question:
             continue
 
-        # Obter o termo de busca (com ou sem IA)
-        search_term = get_search_term_from_user(user_input)
+        # 1. Usar IA para identificar o item base da pergunta
+        search_term = user_question
+        if LLM_ENABLED:
+            try:
+                prompt = PROMPT_IDENTIFICACAO.format(user_input=user_question)
+                llm_response = llm.invoke(prompt).strip()
+                if "ERRO" not in llm_response and llm_response:
+                    search_term = llm_response
+                    print(f"🤖 Item base identificado pela IA: {search_term}")
+            except Exception as e:
+                print(f"⚠️  Não foi possível usar a IA para identificação: {e}")
 
-        # Buscar os itens correspondentes
+        # 2. Buscar todas as variantes do item
         search_results = item_loader.search_item_by_name(search_term)
         if not search_results:
             print(f"❌ Nenhum item encontrado para '{search_term}'. Tente novamente.")
             continue
         
-        # Por enquanto, vamos analisar apenas o primeiro resultado encontrado
-        # TODO: Permitir que o usuário escolha qual item analisar se houver múltiplos resultados
-        first_result = search_results[0]
-        variants = first_result['variants']
-        print(f"\n🔄 Analisando {len(variants)} variantes de '{first_result['base_name']}'...")
+        variants = search_results[0]['variants']
+        base_name = search_results[0]['base_name']
+        print(f"\n🔄 Analisando {len(variants)} variantes de '{base_name}' em segundo plano...")
+
+        # 3. Analisar todas as variantes e coletar oportunidades
+        all_opportunities = []
+        for item_id in variants:
+            analysis = market_analyzer.analyze_single_item_market(item_id)
+            if analysis:
+                all_opportunities.append({
+                    "item_id": item_id,
+                    "item_name": item_loader.get_item_name(item_id),
+                    "analysis": analysis
+                })
         
-        # Analisar e imprimir as oportunidades
-        opportunities = analyzer.analyze_arbitrage(variants)
-        analyzer.print_arbitrage_results(opportunities)
+        if not all_opportunities:
+            print(f"\n❌ Nenhuma oportunidade de arbitragem encontrada para '{base_name}'.")
+            continue
+
+        # 4. Ordenar as oportunidades pela margem de lucro
+        all_opportunities.sort(key=lambda x: x['analysis']['profit_percent'], reverse=True)
+
+        # 5. Apresentar as 3 melhores oportunidades
+        print(f"\n{'='*80}\n🎯 AS 3 MELHORES OPORTUNIDADES PARA '{base_name.upper()}'\n{'='*80}")
+        TOP_N = 3
+        for i, opp in enumerate(all_opportunities[:TOP_N], 1):
+            item_id = opp['item_id']
+            item_name = opp['item_name']
+            analysis = opp['analysis']
+            
+            print(f"\n{i}. {item_name} ({item_id})")
+            
+            market_summary_text = (
+                f"- Rota de Compra e Venda: {analysis['buy_location']['city']} -> {analysis['sell_location']['city']}\n"
+                f"- Preço de Compra: {analysis['buy_location']['price']:,} silver\n"
+                f"- Preço de Venda: {analysis['sell_location']['price']:,} silver\n"
+                f"- Lucro Potencial: {analysis['profit']:,} silver\n"
+                f"- Margem de Lucro: {analysis['profit_percent']:.2f}%"
+            )
+            print(market_summary_text)
+
+            item_description = item_loader.get_item_description(item_id)
+            recommendation = get_ai_recommendation(
+                item_id, item_name, item_description, market_summary_text, user_question
+            )
+            print(f"\n💡 Recomendação da IA:\n{recommendation}")
+            print("-" * 50)
 
 if __name__ == "__main__":
     main()

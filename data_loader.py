@@ -108,3 +108,7 @@ class ItemDataLoader:
     def get_item_name(self, item_id: str) -> str:
         """Retorna o nome de um item a partir de seu ID."""
         return self.items_dict.get(item_id, {}).get("name", item_id)
+
+    def get_item_description(self, item_id: str) -> str:
+        """Retorna a descrição de um item a partir de seu ID."""
+        return self.items_dict.get(item_id, {}).get("description", "")
